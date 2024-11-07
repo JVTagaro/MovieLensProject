@@ -1,0 +1,2497 @@
+---
+title: "MovieLens Project"
+author: "Tagaro, Jerome Vincent L."
+date: "2024-11-06"
+output:
+  pdf_document:
+    fig_caption: yes
+    number_sections: true
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+# dev = 'pdf' is used to lower output size
+#   all plot are forced into the pdf default which is smaller than
+#   the full sized plots.
+knitr::opts_chunk$set(echo = FALSE, 
+                      dev='pdf',
+                      toc = TRUE,
+                      warning = FALSE,
+                      fig.height=4)
+# knitr::purl() # extracts code
+```
+# Introduction
+## Movielens Capstone Project
+
+The goal is to create a movie recommendation system using the full-length
+movielens dataset (available and obtained at: 
+<https://grouplens.org/datasets/movielens/latest/> and
+<http://files.grouplens.org/datasets/movielens/ml-10m.zip> ).
+\
+\
+The MovieLens data is downloaded and the provided code for generating the datasets
+is run. 
+Then, using the generated data set, train a machine learning algorithm using the
+inputs in one subset of the data as *Input Set*
+to predict the movie ratings in a *Evaluation Set*.
+This prediction will be the basis for the recommendation system, 
+i.e. a higher predicted rating implies that a user will like the specified movie.
+In this report, the *Input Set* will be the `edx` data and the
+*Evaluation Set* will be the `final_holdout_test` data.\
+The *Evaluation Set* should only be used for the final model evaluation. 
+Thus, the *Input Set* has to be divided into a smaller *train set* and a *test set*.
+\
+
+The model/s will use linear regression to predict `ratings`.
+Thus, the models will assume or be similar to the form :\
+$Y_{i} = \beta_{0} + \beta_{1} x_{i1} + \ldots + \beta_{p} x_{ip} + \varepsilon$\
+Where,\
+$i = 1, \ldots, n$\
+$x_{i,n}$ are the corresponding biases/preferences, and,\
+$\beta_{n}$ are the constants/coefficients.\
+\
+
+With linear regression, building the model starts with identifying the 
+biases or the $x_{i,n}$ variables. 
+Then, derive corresponding coefficients or $\beta_{n}$ variables.\
+\
+
+All the models in the project will be evaluated using the 
+*Root Mean Square Error* or *RMSE* between the predicted and actual ratings.
+*RMSE* can be obtained using the formula: \
+$RMSE = \sqrt{ \frac{1}{n} \sum_{i=1}^{n}(predicted_{i} - actual_{i})}$\
+The target *RMSE* of the project is $RMSE < 0.86490$.\
+\
+
+This report will use some of the codes in the *previous courses* as starting points.
+Mainly, the code will use the previous *User Bias* and *Movie Bias* as starting point or for comparison.\
+\
+
+```{r loadPackages, echo=FALSE, include=FALSE}
+# 
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(gridExtra)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+if(!require(lubridate)) install.packages("gridExtra", repos = "http://cran.us.r-project.org")
+# Libraries used for the provided code and also in the other parts of the code.
+library(tidyverse)
+library(caret)
+# Not in and not used the provided code, but put here for more streamlined code.
+library(gridExtra)
+library(lubridate)
+```
+
+```{r providedCode}
+
+options(timeout = 120)
+
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE),
+                         stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), simplify = TRUE),
+                        stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Final hold-out test set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+# Make sure userId and movieId in final hold-out test set are also in edx set
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from final hold-out test set back into edx set
+suppressMessages(removed <- anti_join(temp, final_holdout_test))
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+```{r getInfo}
+# Total columns
+total_rows <- edx %>% nrow() 
+total_eval <- final_holdout_test %>% nrow()
+total_cols <- edx %>% ncol()
+# Identify the columns
+column_names <- names(edx) 
+```
+
+## Data set
+
+```{r getGenres-extraction}
+# Regex pattern "[a-zA-Z\\-\\s]+" used to get genres without the delimiter
+genres_in_data <- edx %>% 
+  mutate(genreList = str_extract_all(genres, "[a-zA-Z\\-\\s]+")) %>% 
+  .$genreList %>% 
+  unlist() %>% 
+  unique()
+total_genres <- length(genres_in_data)
+```
+
+\
+The entire data set is made up of the *Input Set* `edx` and 
+the *Evaluation set* `final_holdout_test`.\
+\
+Looking at a snippet of the *Input Set* `edx`:\
+
+```{r showDataFirstLook}
+# Look at the first 4 rows of the data
+edx  %>% head(4) %>% knitr::kable()
+```
+
+\
+A basic summary of the data sets:
+
+- The *Input Set* has `r total_rows` rows.\
+- The *Evaluation Set* has `r total_eval` rows.\
+- Both Data sets will have `r total_cols` columns.\
+- The column_names are `r column_names`.\
+\
+
+From the summary,
+the 6 columns can be divided into *inputs* and an *output*.\
+\
+**Input** columns:\
+- The `userId` identifies the user.\
+- The `movieId` identifies the movie.\
+- The `timestamp` should be the time the rating is made.\
+- The `title` is the title associated with the corresponding `movieId`.\
+- The `genre` column lists out the associated genres for the movie in a string.\
+These 5 columns are the *inputs* of the model that will be used to
+train the model for predicting the *output*.\
+\
+**Output** column:\
+- The `rating` column is the rating made by the user on a movie. \
+The `rating` column is the *output* of the model, 
+and will be the basis of the recommendation system.\
+
+\
+The `genres` column show the movies genres in one string. 
+Using *regex* the individual genres can be separated and extracted.\
+\
+There are `r total_genres` unique genres in the entire *Input Set*.
+These genres are:\
+`r genres_in_data`
+\
+\
+
+
+
+\newpage
+
+
+# Methods / Analysis
+
+## Split `edx` 
+
+\
+The *Evaluation Set* `final_holdout_test` should only be used for the evaluation
+of the final model. 
+It is thus necessary to further split the *Input Set* `edx`
+into a *train set* and a *test set* that can be used for testing
+initial or partial models.
+The *train set* and *test set* will be *90%* a *10%* of the *Input Set*, respectively.\
+
+```{r splitData, warning = FALSE}
+# Split edx into 90% training set and 10% test set
+set.seed(2024,sample.kind = "Rounding")
+edx_ind <- createDataPartition(edx$rating,times = 1,p=0.9,list=FALSE)
+edx_train <- edx[ edx_ind, ]
+edx__test <- edx[-edx_ind, ]
+```
+
+```{r splitData-rm, echo=FALSE}
+# rm() used to ease memory usage and prevent accumulation of unused 
+#   variables or dataframes.
+# All rm() from this one to the last one should not be shown in the document
+#   by using `echo = FALSE`. 
+rm(edx_ind)
+```
+
+
+
+
+## Train Set Summary
+
+```{r splitData-info}
+t_rows_train <- edx_train %>% nrow()
+t_rows__test <- edx__test %>% nrow()
+```
+The *train set* has `r t_rows_train` rows and 
+the *test set* has `r t_rows__test` rows.\
+
+
+\
+Getting the overall average or $\mu$ of the *train set* alongside the
+minimum and maximum values
+
+```{r trainSummary}
+#| fig.cap = "Summary of the Train Set"
+#
+overall_average <- edx_train %>% 
+  summarise(ave_rat = mean(rating),
+            min_rat = min(rating),
+            max_rat = max(rating) )
+max_rating <- overall_average$max_rat
+min_rating <- overall_average$min_rat
+average_rating <- overall_average$ave_rat
+overall_average %>% knitr::kable(col.names = c("Average", "Minimum", "Maximum"))
+```
+
+```{r trainSumamry-rm, echo = FALSE}
+rm(overall_average)
+```
+
+
+## Initial Model based on Average
+
+The average of all the ratings can be used as a simple predictor of ratings.
+It can also serve as the basis for subsequent models.\
+
+This model can be represented by the equation\
+$Y = \mu$ \
+Where $Y$ is the predicted rating and\
+$\mu$ is the overall average \
+\
+
+
+```{r testOverallAverageModel}
+plot_res_tile <- function(df){
+  max_p <- df %>% .$predicted_rating %>% max()
+  min_p <- df %>% .$predicted_rating %>% min()
+  max_p <- ifelse(max_rating >= max_p, max_rating, max_p)
+  min_p <- ifelse(min_rating <= min_p, min_rating, min_p)
+  df %>% 
+    ggplot(aes(rating,predicted_rating)) +
+    geom_bin2d(binwidth = c(0.5,0.25), drop=TRUE, hjust = -0.5, vjust = -0.25) +
+    geom_abline(slope = 1, intercept = 0) +
+    ylim(min_p,max_p) +
+    xlab("Rating") +
+    ylab("Predicted Rating")
+}
+# Predict ratings
+res <- edx__test %>% 
+  mutate(predicted_rating = average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+```
+
+Using the previously obtained $\mu = `r average_rating`$, 
+the model evaluated using the *test set* resulted 
+to an *RMSE* is `r res_rmse`.\
+\
+
+After each model, showing all constructed models in a table will be useful for
+comparison and choosing the final model.\
+
+```{r showInitialTable}
+# Put and Show the result in table.
+Model_List <- data.frame(Model = "Overall Average Model",
+                         rmse = res_rmse)
+Model_List %>% knitr::kable()
+```
+
+```{r testOverallAverageModel-rm,echo = FALSE}
+# remove res to save memory
+rm(res)
+```
+
+\newpage
+
+## User Bias Model
+
+Each user likely has some biases and tendencies for rating a movie. 
+This bias can be called the *User Bias*.
+A model can be constructed by taking into account these biases.\
+
+
+### User Average  
+
+Looking at the density plot of the user averages:\
+
+```{r getUsers-initial}
+user_average <- edx_train %>% 
+  group_by(userId) %>% 
+  summarise(total = n(),
+            user_average = mean(rating))
+```
+
+```{r plotUserAverages}
+#| echo = FALSE,
+#| fig.cap = "Density Plot of user average"
+
+user_average %>% 
+  ggplot(aes(x=user_average)) +
+  geom_density(kernel = "gaussian",fill = "blue",alpha = 0.5) +
+  annotate(geom = "segment", x=average_rating, xend = average_rating , y = 0, yend = 1.0,color = "blue",linewidth = 2) +
+  annotate(geom = "text",x = average_rating - 0.12, y=0.95, label = "mu", color = "blue" ) +
+  xlab("User Averages") +
+  ylab("Density") +
+  theme_bw()
+```
+\
+It can be seen that the user averages are either above or below $\mu$. 
+This means that the user average $\mu_{u}$ can be represented
+as:\
+$\mu_{u} = \mu + r_{u}$\
+Where $r_{u}$ is distance of the user average $\mu_{u}$ from $\mu$ 
+or *residual* .\
+
+```{r userAverages-rm,echo = FALSE}
+rm(user_average)
+```
+
+\newpage
+
+### User Residual
+
+We can get the residual $r_{u}$ by subtracting each rating 
+by $\mu$ before getting the average.\
+\
+$r_{u} = mean( rating - \mu )$\
+
+
+```{r getUserResiduals}
+user_residuals <- edx_train %>% 
+  group_by(userId) %>% 
+  summarise(total = n(),
+            user_residual = mean(rating-average_rating))
+```
+
+Plotting a density plot of residual $r_{u}$:\
+
+```{r plotUserResiduals}
+#| echo = FALSE,
+#| fig.cap = "Density Plot of user bias"
+user_residuals %>% 
+  ggplot(aes(x=user_residual)) +
+  geom_density(kernel = "gaussian",fill = "blue",alpha = 0.5) +
+  xlab("User Residual") +
+  ylab("Density") +
+  theme_bw()
+```
+
+Looking at the plot, the residual contains 0 and goes from negative to positive
+value. 
+This makes the residual a better representation of bias. 
+Negative residual value represents negative bias.
+While, Positive residual value represents positive bias.\
+
+\newpage
+
+### Initial Test of the User Bias Model
+
+\
+The residual $r_{u}$ can now be used to form the next model. 
+The new model based on user bias can be represented by:\
+$Y = \mu + b_{u}$\
+Where $b_{u}$ is the User Bias.\
+
+```{r testUserResidualModel}
+# Get a mean of the user_residuals to substitute NA rows
+#   or rows with no previous ratings in the train set.
+mean_user <- user_residuals %>% 
+  summarise(ave = mean(user_residual)) %>% .$ave
+# Predict test set using User Bias
+res <- edx__test %>% 
+  left_join(user_residuals, by = "userId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual),mean_user,user_residual)) %>% 
+  mutate(predicted_rating = average_rating + user_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+# Put and Show the results in a table
+Model_List <- bind_rows(Model_List,
+                        data.frame(Model = "User Residual",
+                                   rmse = res_rmse))
+```
+
+\
+Plotting the Model results' *predicted ratings* vs *ratings*
+\
+
+```{r testUserResidualModelPlot}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of the User Bias Model"
+#
+plot_res_tile(res)
+```
+
+The *User Bias* model resulted in an RMSE of `r res_rmse`.
+Also, the results plot shows that a large part of the results hover around the 
+identity line. 
+This means that, alongside the *RMSE*, the *User Bias* model is 
+accurate enough to predict ratings.\
+\
+Comparing the User Bias model with the initial model:\
+
+```{r testUserResidualModelTable}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+### User Bias Regularization
+
+The results from the *User Bias* Model can be further explored
+to look for ways of reducing *RMSE*. 
+To approximate the effect on *RMSE*, 
+use the absolute difference between *predicted* and *actual* ratings:\
+$difference = |predicted - actual|$\
+\
+
+Looking at the results:\
+
+```{r justifyUserRegularization}
+# Find top 10 of absolute difference between predicted and actual ratings
+res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  arrange(desc(difference)) %>% 
+  top_n(10,difference) %>% 
+  select(userId, movieId, user_residual, rating, predicted_rating, difference, total) %>% 
+  knitr::kable( caption = "Results with the highest difference" )
+```
+
+Most of the observations with highest difference from the *predicted*
+rating and the *actual* rating have user's total ratings less than 100.\
+\
+
+Also :\
+
+```{r justifyUserRegularization2}
+res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  filter(total < 50) %>% 
+  arrange(desc(difference)) %>% 
+  top_n(10,difference) %>% 
+  select(userId, movieId, user_residual, rating, predicted_rating, difference, total) %>% 
+  knitr::kable( caption = "Results with the highest difference and total < 50")
+```
+
+\newpage
+
+\
+Using `difference`,
+visualize and plot the relationship between total number of ratings, user bias and the difference:\
+
+```{r justifyUserRegularization-getplot}
+# Get Difference of the actual and predicted ratings.
+# Use round() to group variables into small bins suitable for geom_tile()
+raw_res <- res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  mutate(total = round(total,-2)) %>% 
+  mutate(user_residual = round(user_residual,1)) %>% 
+  mutate(difference = round(difference,1)) %>% 
+  group_by(userId) %>% 
+  summarise(difference = mean(difference),
+            total = mean(total),
+            user_residual = mean(user_residual))
+```
+
+```{r justifyUserRegularization-actualPlot}
+#| echo = FALSE,
+#| fig.cap = "Plot showing the relationship between total ratings, user residual, and difference"
+
+# geom_tile() with grouping allows smaller memory size used per plot
+raw_res %>% 
+  ggplot(aes(x = total, y = user_residual)) +
+  geom_tile(aes(fill = difference)) +
+  xlab("Total ratings") +
+  ylab("User Residual") +
+  theme_bw()
+```
+
+\
+This plot shows that the residual value from users with low number of
+total ratings has a large range of values that might introduce larger
+errors. **Regularization** can be introduced to lower this range.\
+\
+
+To regularize the residual a constant `k` could be added to the divisor
+when getting the average of the residuals:\
+From \
+$r_{u} = \sum_{i=1}^{n} \frac{rating - \mu}{n}$, \
+to the \
+$r_{u} = \sum_{i=1}^{n} \frac{rating - \mu}{n + k}$\
+\
+Where `n` is the total number of ratings by the user\
+And `k` is an adjustable parameter for regularization.\
+\
+This formula minimizes $r_{u}$ if the total ratings **n** is low. 
+For larger **n** the effect of *k* on $r_{u}$ is low.
+\
+
+```{r regularizedUserResidual}
+user_k <- 5
+user_residuals_regularized <- edx_train %>% 
+  group_by(userId) %>% 
+  summarise(total=n(),
+            divisor = total + user_k,
+            user_residual = sum(rating-average_rating)/divisor)
+```
+
+
+```{r testRegularizedUserResidual}
+res <- edx__test %>% 
+  left_join(user_residuals_regularized, by = "userId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual),mean_user,user_residual)) %>% 
+  mutate(predicted_rating = average_rating + user_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating) 
+```
+Using an initial value $k=5$, 
+the RMSE of the model is `r res_rmse`\
+\
+
+\newpage
+
+Plotting the regularized user bias:\
+
+```{r regularizedUserResidual-plot}
+#| echo = FALSE,
+#| fig.cap = "Plot showing the relationship between total ratings, user residual, and difference with Regularization"
+reg_res <- res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  #filter(difference > 3.5) %>% 
+  mutate(total = round(total,-2)) %>% 
+  mutate(user_residual = round(user_residual,1)) %>% 
+  mutate(difference = round(difference,1)) %>% 
+  group_by(userId) %>% 
+  summarise(difference = mean(difference),
+            total = mean(total),
+            user_residual = mean(user_residual))
+plot1 <- raw_res %>% 
+  ggplot(aes(x = total, y = user_residual)) +
+  geom_tile(aes(fill = difference)) +
+  theme_bw() +
+  xlab("Total Ratings") +
+  ylab("User Residual")
+plot2 <- reg_res %>% 
+  ggplot(aes(x = total, y = user_residual)) +
+  geom_tile(aes(fill = difference)) +
+  ylim(min(raw_res$user_residual),max(raw_res$user_residual)) +
+  theme_bw() +
+  xlab("Total Ratings") +
+  ylab("User Residual")
+plot2
+```
+
+\newpage
+
+Comparing the plots of User Bias with and without Regularization :\
+
+```{r sideBySidePlotUserResidual}
+#| echo = FALSE,
+#| fig.cap = "Combined Plot without Regularization(Left) and with Regularization(Right)"
+plot1 <- plot1 + theme(legend.position = "none")
+plot2 <- plot2 + theme(legend.position = "none")
+grid.arrange(plot1,plot2,ncol = 2)
+```
+
+The 2 plots above shows that Regularization can minimize the residuals
+of users with low total number of ratings. 
+
+
+\newpage
+
+The parameter `k` may still be improved to get 
+the minimum RMSE possible for User Bias:\
+
+```{r findUserK}
+# A function to get the RMSE of User-Bias Model using a regularization
+#   parameter k
+get_user_k <- function(k){
+  user_residuals_regularized <- edx_train %>% 
+    group_by(userId) %>% 
+    summarise(total=n(),
+              divisor = total + k,
+              user_residual = sum(rating-average_rating)/divisor)
+  res <- edx__test %>% 
+    left_join(user_residuals_regularized, by = "userId") %>% 
+    mutate(user_residual = ifelse(is.na(user_residual),mean_user,user_residual)) %>% 
+    mutate(predicted_rating = average_rating + user_residual)
+  RMSE(res$predicted_rating,res$rating)
+}
+# Range of k to search through
+user_k_seq <- seq(1,10,1)
+user_k_rmse <- unlist(lapply(user_k_seq,get_user_k))
+```
+
+\
+
+``` {r findUserK-plotter-def}
+#| echo = FALSE,
+#| fig.cap = "Plot of the resulting RMSE for different parameter k"
+
+# define plotter, since it might be useful later
+plot_param_rmse <- function(seq_vector, rmse_vector, prev_k){
+  mean_rmse <- mean(rmse_vector)
+  if(prev_k != 0){
+    cbind(as.data.frame(seq_vector),
+        as.data.frame(rmse_vector)) %>% 
+    ggplot(aes(seq_vector,rmse_vector)) +
+    geom_point() +
+    geom_vline(xintercept = prev_k) +
+    annotate("text", x = prev_k, y = mean_rmse, hjust = 1.3, label = "initial k") +
+    xlab("K") +
+    ylab("RMSE") +
+    theme_bw()
+  }else{
+    cbind(as.data.frame(seq_vector),
+        as.data.frame(rmse_vector)) %>% 
+    ggplot(aes(seq_vector, rmse_vector)) +
+    geom_point() +
+    xlab("K") +
+    ylab("RMSE") +
+    theme_bw()
+  }
+}
+plot_param_rmse(user_k_seq, user_k_rmse, user_k)
+```
+
+```{r findUserK-plot}
+#s
+
+```
+
+``` {r findUserK-result}
+# Minimum rmse obtained
+min_rmse <- min(user_k_rmse) 
+# k that corresponds to the minimum rmse.
+min_k <- user_k_seq[which.min(user_k_rmse)] 
+```
+
+\
+The results show that the lowest RMSE is `r min_rmse` at k of `r min_k`.\
+
+``` {r findUserK-final}
+# Use k from results
+user_k <- user_k_seq[which.min(user_k_rmse)]
+# Obtain new user residuals 
+user_residuals_regularized <- edx_train %>% 
+  group_by(userId) %>% 
+  summarise(total=n(),
+            divisor = total + user_k,
+            user_residual = sum(rating-average_rating)/divisor)
+# Change mean that corresponds to current residual set
+mean_user <- user_residuals_regularized %>% 
+  summarise(ave = mean(user_residual)) %>% .$ave
+# Predict ratings using User Bias with regularization
+res <- edx__test %>% 
+  left_join(user_residuals_regularized, by = "userId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual),mean_user,user_residual)) %>% 
+  mutate(predicted_rating = average_rating + user_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+#
+# Put and show results in a table
+Model_List <- bind_rows(Model_List,
+                        data.frame(Model = "User Bias w/ Regularization",
+                                   rmse = res_rmse))
+```
+
+\newpage
+Plotting the results:\
+
+```{r findUserK-Plot}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of the User Bias Model with Regularization"
+plot_res_tile(res)
+```
+
+\
+Showing the current table of the current models:\
+
+```{r findUserK-table}
+Model_List %>% knitr::kable()
+```
+\
+The results show that the *User Bias* Model has a lower *RMSE* than the base model.
+And the regularization resulted to a reduction in *RMSE*\
+\
+
+\newpage
+
+## Movie Bias Model 
+\
+Movies are generally have either a positive or a negative reception to the audiences.
+This results in either a below average or above average movie rating.
+*Good* movies will have ratings closer to the maximum rating, 
+and *Bad* movies will have ratings closer to the minimum rating.
+This factor can be called the *Movie Bias*, 
+and it can also be used to predict the ratings.\
+
+
+### Movie Average
+
+The Movie Bias can be represented by the average rating each movie received.\
+
+```{r getMovie-initial}
+movie_average <- edx_train %>% 
+  group_by(movieId) %>% 
+  summarise(total = n(),
+            movie_average = sum(rating)/total)
+```
+
+Plotting the density plot of the Movie Averages:\
+
+```{r plotMovieAverages}
+#| echo = FALSE,
+#| warning = FALSE,
+#| fig.cap = "Density Plot of Movie Average"
+movie_average %>% 
+  ggplot(aes(x = movie_average)) +
+  geom_density(kernel = "gaussian",
+               fill = "blue",
+               alpha = 0.5) +
+  annotate(geom = "segment", 
+           x = average_rating, xend = average_rating,
+           y = 0, yend = 1.0,
+           color = "blue",
+           linewidth = 2) +
+  annotate(geom = "text",
+           x = average_rating - 0.12, y = 0.95,
+           label = "mu") +
+  xlab("Movie Averages") +
+  ylab("Density") +
+  theme_bw()
+```
+
+\newpage
+
+### Movie Residual
+
+As with user bias, the movie average $\mu_{m}$ can also be presented as:\
+$\mu_{m} = \mu + r_{m}$\
+Where $r_{m}$ is the residual.\
+\
+Like the User residual, 
+the movie residual $r_{m}$ can be obtained by using:\
+$r_{m} = mean( rating - \mu )$\
+\
+
+```{r getMovieResiduals}
+movie_residuals <- edx_train %>% 
+  group_by(movieId) %>% 
+  summarise(total = n(),
+            divisor = total,
+            movie_residual = sum(rating - average_rating) / divisor)
+```
+
+Plotting the density plot of the movie residual $r_{m}$:\
+
+```{r plotMovieResiduals}
+#| echo = FALSE,
+#| warning = FALSE,
+#| fig.cap = "Density Plot of User Residual"
+
+movie_residuals %>% 
+  ggplot(aes(x = movie_residual)) +
+  geom_density(kernel = "gaussian", fill = "blue", alpha = 0.5) +
+  xlab("Movie Residual") +
+  ylab("Density") +
+  theme_bw()
+```
+
+The plot shows that the residual contains 0 and goes from negative to positive values.
+Like in the *User Bias*, the movie residual is a better representation of the *Movie Bias*.
+Positive residual value means positive bias.
+While, Negative residual value means negative bias.
+\
+
+\newpage
+
+### Movie Bias Model
+
+
+The residual $r_{m}$ can now be used to form the next model. 
+The new model based on movie bias can be represented by:\
+$Y = \mu + b_{m}$\
+Where $b_{m}$ is the Movie Bias.\
+\
+
+Using the Movie Bias model:\
+
+```{r testMovieResidualModel}
+# Get Mean movie to substitute NAs or movies without previous ratings on the train set.
+mean_movie <- movie_residuals %>% 
+  summarise(ave = mean(movie_residual)) %>% .$ave
+# Predict ratings
+raw_res <-  edx__test %>% 
+  left_join(movie_residuals, by = "movieId") %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual),
+                                mean_movie,
+                                movie_residual)) %>% 
+  mutate(predicted_rating = average_rating + movie_residual)
+res_rmse <- RMSE(raw_res$predicted_rating,raw_res$rating)
+#
+# Put and show results in a table
+Model_List <-  bind_rows(Model_List,
+                         data.frame(Model = "Movie Bias",
+                                    rmse = res_rmse))
+```
+
+```{r testMovieResidualModel-plot}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of the Movie Bias Model"
+plot_res_tile(res)
+```
+
+The Resulting RMSE of the *Movie Bias* model is `r res_rmse`.\
+\
+Showing the Models table:\
+
+```{r testMovieResidualModel-table}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+### Movie Bias Regularization
+
+Like the User Bias Model,
+the results from the Movie Bias Model can be further explored
+to look for ways of reducing *RMSE*. 
+To approximate the effect on *RMSE*, 
+use the absolute difference between predicted and actual ratings:\
+$difference = |predicted - actual|$\
+\
+
+Looking at the results:\
+
+```{r justifyMovieRegularization}
+raw_res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  arrange(desc(difference)) %>% 
+  top_n(10,difference) %>% 
+  select(userId, movieId, movie_residual, rating, difference, total) %>% 
+  knitr::kable(caption = "Results with the highest difference" )
+```
+
+Using `difference`,
+Plot the relationship between total number of ratings, movie bias and the difference:\
+\
+```{r justifyMovieRegularization-plot}
+#| echo = FALSE,
+#| fig.cap = "Plot showing the relationship between total ratings, movie residual and difference",
+#| warning = FALSE
+
+raw_res <- raw_res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  mutate(total = round(total,-2)) %>% 
+  mutate(movie_residual = round(movie_residual,1)) %>% 
+  mutate(difference = round(difference,1)) %>% 
+  group_by(movieId) %>% 
+  summarize(difference = mean(difference),
+            total = mean(total),
+            movie_residual = mean(movie_residual))
+raw_res %>% 
+  ggplot(aes(x = total, y = movie_residual)) +
+  geom_tile(aes(fill = difference)) +
+  xlab("Total Ratings") +
+  ylab("Movie Residual") +
+  theme_bw()
+```
+
+\
+\
+The results and the plot shows that the residual values from movies 
+with lower total number of ratings have a large range of values that might introduce
+larger errors. Regularization can be introduced to lower this range\
+\
+To regularize the residual a constant `k` could be added to the divisor
+when getting the average of the residuals:\
+From \
+$r_{m} = \sum_{i=1}^{n} \frac{rating - \mu}{n}$, \
+to the \
+$r_{m} = \sum_{i=1}^{n} \frac{rating - \mu}{n + k}$\
+\
+Where `n` is the total number of ratings of the movie.\
+And `k` is an adjustable parameter for regularization.\
+\
+This formula minimizes $r_{m}$ if the total ratings **n** is low. 
+For larger **n** the effect of *k* on $r_{m}$ is low.\
+
+```{r regularisedMovieResidual}
+movie_k <- 5
+movie_residuals_regularized <- edx_train %>% 
+  group_by(movieId) %>% 
+  summarise(total = n(),
+            divisor = total + movie_k,
+            movie_residual = sum(rating - average_rating)/divisor) 
+```
+
+```{r testRegularizedMovieResidual}
+# Get new mean
+mean_movie <- movie_residuals %>% 
+  summarise(ave = mean(movie_residual)) %>% .$ave
+# Predict results
+res <- edx__test %>% 
+  left_join(movie_residuals_regularized, by = "movieId") %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual), 
+                                mean_movie,
+                                movie_residual)) %>% 
+  mutate(predicted_rating = average_rating + movie_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+```
+\
+Using an initial value $k=5$, 
+the RMSE of the model is `r res_rmse`.\
+
+\newpage
+Plotting the relationship between total number of ratings, movie bias and the difference with Regularization:\
+
+```{r regularizedMovieResidual-plot}
+#| echo = FALSE,
+#| fig.cap = "Plot showing the relationship between total ratings, movie residual and difference with Regularization"
+#
+reg_res <- res %>% 
+  mutate(difference = abs(predicted_rating - rating)) %>% 
+  #filter(difference > 3.5) %>% 
+  mutate(total = round(total,-2)) %>% 
+  mutate(movie_residual = round(movie_residual,1)) %>% 
+  mutate(difference = round(difference,1)) %>%
+  group_by(movieId) %>% 
+  summarise(difference = mean(difference),
+            total = mean(total),
+            movie_residual = mean(movie_residual))
+plot1 <- raw_res %>% 
+  ggplot(aes(x = total, y = movie_residual)) +
+  geom_tile(aes(fill = difference)) +
+  theme_bw() +
+  xlab("Total Ratings") +
+  ylab("Movie Residual")
+plot2 <- reg_res %>% 
+  ggplot(aes(x = total, y = movie_residual)) +
+  geom_tile(aes(fill = difference)) +
+  ylim(min(raw_res$movie_residual),max(raw_res$movie_residual)) +
+  theme_bw() +
+  xlab("Total Ratings") +
+  ylab("Movie Residual")
+plot2
+```
+
+\newpage
+Comparing the plot of Movie Bias with and without Regularization :\
+
+```{r sideBySidePlotMovieResidual, echo = FALSE}
+#| echo = FALSE,
+#| warning = FALSE,
+#| fig.cap = "Combined relationship plot without Regularization(Left) and with Regularization(Right)"
+#
+plot1 <- plot1 + theme(legend.position = "none")
+plot2 <- plot2 + theme(legend.position = "none")
+grid.arrange(plot1,plot2,ncol = 2)
+```
+
+Regularization minimized the residuals of movies with lower total number of ratings,
+while keeping the residuals of movies with higher number of ratings almost the same.
+
+\newpage
+
+As with the *User Bias* the `k` for *Movie Bias* can still be optimized to get better RMSE.\
+
+```{r findMovieK}
+get_movie_k <- function(k){
+  movie_k <- k
+  movie_residuals_regularized <- edx_train %>% 
+    group_by(movieId) %>% 
+    summarise(total = n(),
+              divisor = total + movie_k,
+              movie_residual = sum(rating - average_rating)/divisor) 
+  res <- edx__test %>% 
+    left_join(movie_residuals_regularized, by = "movieId") %>% 
+    mutate(movie_residual = ifelse(is.na(movie_residual), 
+                                   mean_movie,
+                                   movie_residual)) %>% 
+    mutate(predicted_rating = average_rating + movie_residual)
+  RMSE(res$predicted_rating,res$rating)
+}
+#
+movie_k_seq <- seq(1,10,1)
+movie_k_rmse <- unlist(lapply(movie_k_seq,get_movie_k))
+```
+
+```{r findMovieK-plot, echo = FALSE}
+# Use plotter:
+plot_param_rmse(movie_k_seq,movie_k_rmse,movie_k)
+```
+
+```{r findMovieK-result}
+min_rmse <- min(movie_k_rmse) 
+min_k <-  movie_k_seq[which.min(movie_k_rmse)] 
+```
+
+The results show that the lowest RMSE is `r min_rmse` at k of `r min_k`.
+\
+
+```{r findMovieK-final}
+# Use previous results
+movie_k <- movie_k_seq[which.min(movie_k_rmse)]
+# Get new movie residuals
+movie_residuals_regularized <- edx_train %>% 
+  group_by(movieId) %>% 
+  summarise(total = n(),
+            divisor = total + movie_k,
+            movie_residual = sum(rating - average_rating)/divisor) 
+# Get new mean
+mean_movie <- movie_residuals_regularized %>% 
+  summarise(ave = mean(movie_residual)) %>% .$ave
+# Predict Ratings
+res <- edx__test %>% 
+  left_join(movie_residuals_regularized, by = "movieId") %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual), 
+                                mean_movie,
+                                movie_residual)) %>% 
+  mutate(predicted_rating = average_rating + movie_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+# Put and show results in the table.
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "Movie Bias w/ Regularization",
+                                   rmse = res_rmse))
+```
+
+\newpage
+
+Plotting the results:\
+
+```{r findMovieK-plot2}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of the User Bias Model"
+plot_res_tile(res)
+```
+
+Showing the current table of models:\
+
+```{r findMovieK-table}
+Model_List %>% knitr::kable()
+```
+\
+The results show that both *User Bias* and *Movie Bias* has a lower RMSE
+than the initial model. 
+Also, Regularization resulted to some reduction in RMSE in both biases.
+\
+
+\newpage
+
+## Combine User and Movie Model
+
+The User and Movie Bias model can now be joined to look at how it influences the
+RMSE. 
+Also, it could show the effect of combining Biases into one model.\
+\
+\
+The two previous models can be combined to get a model represented by:\
+$Y = \mu + b_{user} + b_{movie}$\
+Where $b_{user}$ is the user bias\
+And $b_{movie}$ is the movie bias\
+\
+\
+
+```{r testMovieAndUserResidualModel}
+# Use non-regularized user residual for now
+res <-  edx__test %>% 
+  left_join(movie_residuals, by = "movieId") %>% 
+  left_join(user_residuals %>% select(userId,user_residual), by = "userId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual),
+                                mean_user,
+                                user_residual)) %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual),
+                                mean_movie,
+                                movie_residual)) %>% 
+  mutate(predicted_rating = average_rating + user_residual + movie_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+#
+raw_rmse <- res_rmse
+# Put and show results in the table
+Model_List <-  bind_rows(Model_List,
+                         data.frame(Model = "Movie Bias + User Bias",
+                                    rmse = res_rmse))
+```
+
+Plotting the results of the *Movie + User Bias Model* without Regularization:\
+
+```{r testMovieAndUserResidualModel-plot}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of the Movie + User Bias Model"
+plot_res_tile(res)
+```
+
+```{r testRegularizedMovieAndUserResidualModel}
+# Predict using regularized residuals
+res <-  edx__test %>% 
+  left_join(movie_residuals_regularized, by = "movieId") %>% 
+  left_join(user_residuals_regularized, by = "userId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual),
+                                mean_user,
+                                user_residual)) %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual),
+                                mean_movie,
+                                movie_residual)) %>% 
+  mutate(predicted_rating = average_rating + user_residual + movie_residual)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+reg_rmse <- res_rmse
+# Put and show the results in the table.
+Model_List <-  bind_rows(Model_List,
+                         data.frame(Model = "Movie Bias + User Bias w/ Regularization",
+                                    rmse = res_rmse))
+```
+
+\newpage
+
+Plotting the results of the *Movie + User Bias Model* with Regularization:\
+
+```{r testMovieAndUserResidualModel-plotR}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of the Movie + User Bias Model with Regularization"
+plot_res_tile(res)
+```
+
+The RMSE of the combined model without Regularization 
+is `r raw_rmse`. 
+While, the RMSE of the combined model with Regularization is `r reg_rmse`.\
+\
+Showing the current table of models:\
+```{r tableMovieAndUserModel}
+Model_List %>% knitr::kable()
+```
+
+Notice that the combined model of the *User Bias* and *Movie Bias*, 
+resulted in a far lower *RMSE* than the previous models.
+And the combined model with Regularization still 
+has an *RMSE* lower than the model without Regularization.\
+This means that combining different biases can reduce *RMSE*,
+and that combined models are still influenced by Regularization.\
+
+
+\newpage
+
+## Genre Bias
+
+The genres of movies could have some effect on the ratings. 
+Also, users most likely has a preference for some genres of movies over other genres.
+It is worth exploring the effect of genre preference on each users rating.\
+\
+
+```{r getPatternDeclaration}
+# For the next parts, a way to easily detect each genre from the `genres` column is needed.
+# A Function to make a regex pattern for a genre input
+get_pattern <- function(genre){
+  charCombo <- "[a-zA-Z\\| ]*"
+  pattern <- str_c(c(charCombo,genre,charCombo),collapse = "")
+  pattern
+}
+```
+
+```{r makeGenreRegex}
+# Derive the regex pattern of each genre
+# Bind the genres with its own regex pattern
+genres_with_pattern <- genres_in_data %>% 
+  as.data.frame() %>% 
+  mutate(genres = .[]) %>% 
+  select(genres) %>%
+  rowwise(genres) %>% 
+  mutate(genre_pattern = get_pattern(genres)) %>% 
+  ungroup()
+genre_sample <- genres_with_pattern[1,]$genres
+genre_pattern_sample <- genres_with_pattern[1,]$genre_pattern
+```
+
+To extract the details for each genre, a *regex* pattern of each genre is used.
+The pattern will be used to detect if the `genres` column/string has that genre.\
+For example, the genre pattern used for detecting genre `r genre_sample` : 
+`r genre_pattern_sample`.\
+
+\
+To show how the *regex* patterns can be used,
+get a summary data of each genre :\
+
+```{r declareGenreSummaryFunction}
+# Function to extract average rating and total (n) 
+#   of each genre from the data set
+extract_genre_details <- function(i){
+  genre_pattern <-  genres_with_pattern$genre_pattern[i]
+  Genres <- genres_with_pattern$genres[i]
+  edx_train %>% 
+    filter(str_detect(genres, genre_pattern)) %>% 
+    summarise(n = n(),
+              average = sum(rating)/(n)) %>% 
+    mutate(genres = Genres)
+}
+```
+
+```{r extractGenreSummary}
+# extract summary of each genre using the pattern
+genre_summary <- genres_with_pattern %>% 
+  left_join((sapply(1:total_genres, extract_genre_details)) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  mutate(genres = unlist(genres)),by = "genres") %>% 
+  mutate(average = unlist(average)) %>% 
+  mutate(total = unlist(n)) %>% 
+  select(genres,average,total,genre_pattern)
+# Show summary
+genre_summary %>%
+  select(-genre_pattern) %>% 
+  knitr::kable( caption = "Summary of Genres with average rating and total number of ratings")
+```
+
+\newpage
+
+From the summary, an overview of the average ratings of each genre can be plotted:\
+
+```{r averageMovieGenre-plot1}
+#| echo = FALSE,
+#| fig.cap = "Plot of the average ratings per genre"
+genre_summary %>% 
+  ggplot(aes(genres,average)) +
+  geom_point() + 
+  xlab("Genres") +
+  ylab("Average Rating") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1))
+```
+
+\
+\newpage
+
+## User-Genre Bias
+
+Looking at the plot of Genre averages, it can be seen that there
+are differences in the average ratings of each genre. 
+This shows that *genre* could impact the users' ratings.\
+Using the formula:\
+$r_{g,m} = mean(rating - \mu)$\
+Where $r_{g,m}$ is the genre residual of the genre $m$.\
+The genre preference of each user can be extracted.\
+
+```{r declareGetGenreResidual}
+# Function to get the genre bias of each user
+get_genre_residual <- function(i){
+  # Get and Use previously generated regex patterns
+  gen <- genres_with_pattern$genres[i]
+  pat <- genres_with_pattern$genre_pattern[i]
+  # The user residual for different genres
+  edx_train %>% 
+    filter(str_detect(genres,pat)) %>% 
+    group_by(userId) %>% 
+    summarise("{gen}_total":= n(),
+              "{gen}_residual":= (sum(rating-average_rating)/(n()))
+    )
+}
+```
+
+```{r getUserSpecificGenre}
+genre_unprocessed <- lapply(1:total_genres, get_genre_residual)
+genre_residual <- reduce(genre_unprocessed,left_join,by="userId") %>% 
+  replace(is.na(.),0)
+```
+Showing part of the extracted preference:\
+```{r showUserSpecificGenreResults}
+# show 2 genres
+genre_residual[1:4,1:5] %>%
+  knitr::kable( caption = "User preference summary for two genres")
+```
+
+Each user will have different residuals representing the difference between preferences.
+
+\
+To see the how the User-Genre Bias will look like,
+show the entire genre preference of a user:\
+
+```{r listAllGenreResidualFromPair}
+genre_residual[2,] %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  select(userId,residual_type,residual_value) %>% 
+  knitr::kable( caption = "A User's Genre Bias")
+# genre_unprocessed is a really large data, 
+# remove it to make memory consumption lower/easier.
+rm(genre_unprocessed)
+```
+
+Looking at the values of residuals, 
+each user can have a positive or negative bias on a genre. 
+This models the users' preferences.
+The genres where the user did not have any ratings for are set to a
+residual value of `0`.
+This residual values can be called the *User-Genre Bias*.\
+
+
+### User-Genre Bias Model
+
+The genre preference of each user can be used to make a model the same way
+the *User Bias* and *Movie Bias* are used to construct the *User Bias* Model
+and *Movie Bias* Model.
+However the previously obtained *User-Genre Bias* is a list of
+users' preference per genre.
+For each movie the *User-Genre Bias* will vary depending on the movie's genre.\
+\
+To get the *User-Genre Bias* $b_{ug}$ of a movie $m$, use the formula:\
+
+$b_{g,u,m} = \sum {i=1}^{n} g_{m,i} b_{g,u,i}$
+\
+Where **n** is the total number of genres,\
+$g_{m,i}$ is **1** if movie $m$ is in the genre $i$, **0** otherwise.\
+$b_{g,u,i}$ is the genre preference/residual of user $u$ for genre $i$.\
+
+
+Using the obtained *User-Genre Bias*, a model can be made using the formula:\
+$Y = \mu + b_{g,u,m}$\
+Where $b_{g,u,m}$ is the user-genre bias for the movie $m$\
+\
+Putting the two formula together, the User-Genre Formula will be:\
+$Y_{m} = \mu + \sum_{i=1}^{n}( g_{m,i} b_{g,u,i})$
+\
+Plotting the results:\
+
+
+```{r genreTestNewModel}
+# Predict Ratings using the new model
+res <-   edx__test %>% 
+  left_join(genre_residual, by = "userId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "user_genre_residual",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(user_genre_residual = user_genre_residual * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(user_genre_residual = sum(user_genre_residual)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            .groups = "drop") %>% 
+  replace(is.na(.),0) %>% 
+  mutate(predicted_rating = user_genre_residual + average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+
+# Put and show results to the table
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "User-Genre Bias Model", 
+                                   rmse = res_rmse))
+```
+
+```{r genreTestNewModel-plot}
+#| fig.cap = "Relationship bet. Predicted and Actual Ratings of User-Genre Bias Model"
+plot_res_tile(res)
+```
+
+
+The model made using the *User-Genre Bias* has an *RMSE* of `r res_rmse`.
+\
+
+
+Showing the Model List for comparison:\
+
+```{r genreTestNewModel-table}
+Model_List %>% knitr::kable() 
+```
+
+\newpage
+
+### User-Genre Bias Regularization
+
+From the previous biases, Regularization helped reduce RMSE by reducing error
+at lower *total ratings*. 
+To check if regularization can help reduce RMSE for *User-Genre Bias*,
+plot the user-genre bias against total ratings:\
+
+```{r justifyGenreRegularization}
+#| echo = FALSE,
+#| fig.cap = "(Top) User-Genre Bias vs. total ratings, (Bottom) Residual obtained from each genre vs. total user ratings of that genre"
+modified_res <- res %>% 
+  mutate(difference = predicted_rating - rating) %>% 
+  group_by(userId) %>% 
+  summarise(genre_residual = mean(user_genre_residual),
+            total = n(),
+            difference = mean(difference)) %>% 
+  mutate(genre_residual = round(genre_residual,1)) %>% 
+  mutate(difference = round(difference,1)) %>% 
+  mutate(total = round(total,-1)) 
+plot1 <- modified_res %>% 
+  ggplot(aes(total,genre_residual)) +
+  geom_tile(aes(fill = difference)) +
+  theme_bw()
+to_graph <- genre_residual %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  pivot_longer(cols = ends_with("total"),
+               names_to = "total_type",
+               values_to = "total_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_total") %>% 
+  filter(residual_type == total_type) %>% 
+  select(-total_type) 
+plot2 <- to_graph %>% 
+  mutate(total_value = round(total_value,-1)) %>% 
+  mutate(residual_value = round(residual_value,1)) %>% 
+  ggplot(aes(x = total_value,y = residual_value)) +
+  geom_tile(aes(fill = residual_type),alpha=0.5) +
+  theme_bw()
+plot1_maxY <- modified_res %>% .$genre_residual %>% max()
+plot1_minY <- modified_res %>% .$genre_residual %>% min()
+```
+
+```{r justifyGenreRegularization-plot1}
+#| fig.cap = "Plot of relationship bet. Total Ratings, User-Genre Residual and difference"
+plot1
+```
+```{r justifyGenreRegularization-plot2}
+#| fig.cap = "Plot of relationship bet. Total Ratings and User-Genre Residual for each Genre"
+plot2
+```
+
+The two plot looks the same as with user and movie bias, where low total ratings have
+a large range of values that may introduce larger errors.\
+Using the same concept of regularization, 
+the formula for the genre residual $r_{g}$ of each genre $i$ will be : \
+$r_{gi} = \sum_{1}^{n} \frac{rating - \mu}{n + k}$\
+
+\
+
+```{r getGenreRegularization}
+# Declare k parameter
+genre_k <- 5
+# Regularize genre residual based on k
+get_genre_residual_regularized <- function(i){
+  gen <- genres_with_pattern$genres[i]
+  pat <- genres_with_pattern$genre_pattern[i]
+  edx_train %>% 
+    filter(str_detect(genres,pat)) %>% 
+    group_by(userId) %>% 
+    summarise("{gen}_total":= n(),
+              "{gen}_residual":= (sum(rating-average_rating)/(n() + genre_k))
+    )
+}
+genre_unprocessed <- lapply(1:total_genres, get_genre_residual_regularized)
+genre_residual_regularized <- reduce(genre_unprocessed,left_join,by="userId") %>% 
+  replace(is.na(.),0)
+```
+
+
+```{r genreRegularizationPlot}
+#| echo = FALSE
+to_graph <- genre_residual_regularized %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  pivot_longer(cols = ends_with("total"),
+               names_to = "total_type",
+               values_to = "total_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_total") %>% 
+  filter(residual_type == total_type) %>% 
+  select(-total_type)  %>% 
+  mutate(total_value = round(total_value,-1)) %>% 
+  mutate(residual_value = round(residual_value,1)) %>% 
+  ggplot(aes(x = total_value,y = residual_value)) +
+  geom_tile(aes(fill = residual_type),alpha=0.5) +
+  theme_bw()
+```
+
+
+```{r testGenreRegularization}
+# Predict Ratings
+res <- edx__test %>% 
+  left_join(genre_residual_regularized,by = "userId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>%
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            timestamp = first(timestamp),    # Also constant within the group
+            .groups = "drop") %>% 
+  replace(is.na(.),0) %>% 
+  mutate(predicted_rating = genre_residual + average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+```
+
+Using an initial `k = 5`, the resulting RMSE is `r res_rmse`.\
+\
+
+\newpage
+
+Plotting the results for regularization:\
+
+
+``` {r resultBasedGenreResidualGetplot}
+plot2 <- res %>% 
+  mutate(difference = predicted_rating - rating) %>% 
+  group_by(userId) %>% 
+  summarise(genre_residual = mean(genre_residual),
+            total = n(),
+            difference = mean(difference)) %>% 
+  mutate(genre_residual = round(genre_residual,1)) %>% 
+  mutate(difference = round(difference,1)) %>% 
+  mutate(total = round(total,-1)) %>% 
+  ggplot(aes(total,genre_residual)) +
+  geom_tile(aes(fill = difference)) +
+  ylim(plot1_minY,plot1_maxY) +
+  theme_bw()
+```
+
+```{r resultsBasedGenreResidual-plot2}
+#| echo = FALSE,
+#| fig.cap = "Combined Genre Residual vs. total number of ratings by user"
+plot2
+```
+
+\newpage
+
+```{r resultsBasedGenreResidual-tograph}
+#| echo = FALSE,
+#| fig.cap = "Per Genre Residual vs. total number of ratings by user "
+to_graph
+```
+
+
+\newpage
+
+Comparing the current results to the results without regularization:\
+
+```{r compareUserGenreReg}
+#| echo = FALSE,
+#| fig.cap = "Combined User-Genre Residual without Regularization (Left) and with Regularization (Right)"
+plot1 <- plot1 +
+  theme(legend.position = "none")
+plot2 <- plot2 +
+  theme(legend.position = "none")
+grid.arrange(plot1,plot2, ncol = 2)
+```
+
+The regularized residual plot shows a smaller range than without regularization.\
+\
+However, the *k* parameter can still be tuned.\
+
+```{r findGenreK}
+# Declare Function for getting k
+get_genre_k <- function(k){
+  # declare k
+  genre_k <- k
+  # Get new residuals
+  get_genre_residual_regularized <- function(i){
+    gen <- genres_with_pattern$genres[i]
+    pat <- genres_with_pattern$genre_pattern[i]
+    edx_train %>% 
+      filter(str_detect(genres,pat)) %>% 
+      group_by(userId) %>% 
+      summarise("{gen}_total":= n(),
+                "{gen}_residual":= (sum(rating-average_rating)/(n() + genre_k))
+      )
+  }
+  genre_unprocessed <- lapply(1:total_genres, get_genre_residual_regularized)
+  genre_residual_regularized <- reduce(genre_unprocessed,left_join,by="userId") %>% 
+    replace(is.na(.),0)
+  # Predict ratings 
+  res <- edx__test %>% 
+    left_join(genre_residual_regularized,by = "userId") %>% 
+    mutate(across(everything(),~replace_na(.x,0))) %>%
+    pivot_longer(cols = ends_with("residual"),
+                 names_to = "residual_type",
+                 values_to = "residual_value",
+                 names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+    mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+    mutate(residual_value = residual_value * residual_multiplier) %>%
+    group_by(userId,movieId) %>% 
+    summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+              rating = first(rating),          # Rating is constant if same userId & movieId
+              timestamp = first(timestamp),    # Also constant within the group
+              .groups = "drop") %>% 
+    replace(is.na(.),0) %>% 
+    mutate(predicted_rating = genre_residual + average_rating)
+  # Output the results
+  RMSE(res$predicted_rating,res$rating)
+}
+#
+genre_k_seq <-seq(0,5,1)
+genre_k_rmse <- unlist(lapply(genre_k_seq,get_genre_k))
+```
+
+\newpage
+
+Plotting the relationship bet. *K* and *RMSE*:\
+
+```{r findGenreK-plot}
+#| echo = FALSE
+plot_param_rmse(genre_k_seq,genre_k_rmse,genre_k)
+```
+
+```{r findGenreK-final}
+min_rmse <-  min(genre_k_rmse) 
+min_k <-  genre_k_seq[which.min(genre_k_rmse)] 
+```
+
+The plot shows that the lowest RMSE is `r min_rmse` at k of `r min_k`.\
+
+
+```{r testUserGenreBiasModel}
+genre_k <- min_k
+get_genre_residual_regularized <- function(i){
+  gen <- genres_with_pattern$genres[i]
+  pat <- genres_with_pattern$genre_pattern[i]
+  edx_train %>% 
+    filter(str_detect(genres,pat)) %>% 
+    group_by(userId) %>% 
+    summarise("{gen}_total":= n(),
+              "{gen}_residual":= (sum(rating-average_rating)/(n() + genre_k))
+    )
+}
+genre_unprocessed <- lapply(1:total_genres, get_genre_residual_regularized)
+genre_residual_regularized <- reduce(genre_unprocessed,left_join,by="userId") %>% 
+  replace(is.na(.),0)
+res <- edx__test %>% 
+  left_join(genre_residual_regularized,by = "userId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>%
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            timestamp = first(timestamp),    # Also constant within the group
+            .groups = "drop") %>% 
+  replace(is.na(.),0) %>% 
+  mutate(predicted_rating = genre_residual + average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+#
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "User-Genre Bias Model w/ Regularization", 
+                                   rmse = res_rmse))
+```
+
+\newpage
+
+Plotting the results:\
+
+```{r userGenreResultsPlot}
+#| fig.cap = "Relationship bet Predicted and Actual Ratings for User-Genre Bias Model with Regularization.s"
+plot_res_tile(res)
+```
+
+Putting the Regularized *User-Genre Bias* in the table:\
+
+```{r tableUserGenreBiasModel}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+### Movie-Genre Bias
+
+Using the same idea as the User-Genre Bias Model,
+movies' ratings may also be explained by its Genres.
+Try a regularized Movie-Genre bias with the formula:
+\
+$Y_{m} = \mu + \sum_{i=1}^{n}( g_{m,i} b_{g,m,i})$\
+Where,\
+$g_{m,i}$ is **1** if movie $m$ is in the genre $i$, **0** otherwise.\
+$b_{g,m,i}$ is the effect of genre $i$ on movie $m$.\
+\
+
+```{r getMovieGenreResiduals}
+# initial k
+genre_m_k <- 1
+# Get movie-genre using the same method as the user-genre
+get_genre_residual_movie <- function(i){
+  gen <- genres_with_pattern$genres[i]
+  pat <- genres_with_pattern$genre_pattern[i]
+  edx_train %>% 
+    filter(str_detect(genres,pat)) %>% 
+    group_by(movieId) %>% 
+    summarise("{gen}_m_total":= n(),
+              "{gen}_m_residual":= (sum(rating-average_rating)/(n() + genre_m_k))
+    )
+}
+genre_unprocessed <- lapply(1:total_genres, get_genre_residual_movie)
+movie_genre_residual <- reduce(genre_unprocessed,left_join,by="movieId") %>% 
+  replace(is.na(.),0)
+```
+
+
+```{r getMovieGenreResults}
+# Predict Ratings
+res <- edx__test %>% 
+  left_join(movie_genre_residual,by = "movieId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>%
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            timestamp = first(timestamp),    # Also constant within the group
+            .groups = "drop") %>% 
+  replace(is.na(.),0) %>% 
+  mutate(predicted_rating = genre_residual + average_rating)
+```
+
+```{r getMovieGenreResultsRMSE}
+# Show initial RMSE
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+```
+
+Using the initial `k` of `r genre_m_k`, 
+the RMSE of initial *Movie Genre Model* is `r res_rmse`.\
+\
+While the resulting *RMSE* is a little high, it is still lower than the base model.
+And like before, the *k* may still be optimized.
+\
+Find a better *k* for Movie-Genre Bias:\
+
+```{r findMovieGenreK}
+# Declare Function
+get_genre_k_m <- function(k){
+  genre_k_m <- k
+  get_genre_residual_movie <- function(i){
+    gen <- genres_with_pattern$genres[i]
+    pat <- genres_with_pattern$genre_pattern[i]
+    edx_train %>% 
+      filter(str_detect(genres,pat)) %>% 
+      group_by(movieId) %>% 
+      summarise("{gen}_m_total":= n(),
+                "{gen}_m_residual":= (sum(rating-average_rating)/(n() + genre_k_m))
+      )
+  }
+  genre_unprocessed <- lapply(1:total_genres, get_genre_residual_movie)
+  genre_movie_regularized <- reduce(genre_unprocessed,left_join,by="movieId") %>% 
+    replace(is.na(.),0)
+  res <- edx__test %>% 
+    left_join(genre_movie_regularized,by = "movieId") %>% 
+    mutate(across(everything(),~replace_na(.x,0))) %>%
+    pivot_longer(cols = ends_with("residual"),
+                 names_to = "residual_type",
+                 values_to = "residual_value",
+                 names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_m_residual") %>% 
+    mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+    mutate(residual_value = residual_value * residual_multiplier) %>%
+    group_by(userId,movieId) %>% 
+    summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+              rating = first(rating),          # Rating is constant if same userId & movieId
+              timestamp = first(timestamp),    # Also constant within the group
+              .groups = "drop") %>% 
+    replace(is.na(.),0) %>% 
+    mutate(predicted_rating = genre_residual + average_rating)
+  RMSE(res$predicted_rating,res$rating)
+}
+#
+genre_k_m_seq <-seq(0,5,1)
+genre_k_m_rmse <- unlist(lapply(genre_k_m_seq,get_genre_k_m))
+```
+
+Plotting the results:\
+
+```{r findMovieGenreK-plot}
+#| echo = FALSE,
+#| fig.cap = "Plot of the RMSE of each parameter k"
+plot_param_rmse(genre_k_m_seq,genre_k_m_rmse,genre_m_k)
+```
+
+```{r findMovieGenreK-results}
+# Minimum RMSE obtained
+min_rmse <- min(genre_k_m_rmse) 
+# parameter k corresponding to the minimum RMSE
+min_k <- genre_k_m_seq[which.min(genre_k_m_rmse)] 
+```
+The lowest RMSE is `r min_rmse` at k of `r min_k`.\
+\
+
+```{r movieGenreRegularized}
+# Using Obtained k
+genre_k_m <- min_k
+# Get new residuals
+get_genre_residual_movie <- function(i){
+  gen <- genres_with_pattern$genres[i]
+  pat <- genres_with_pattern$genre_pattern[i]
+  edx_train %>% 
+    filter(str_detect(genres,pat)) %>% 
+    group_by(movieId) %>% 
+    summarise("{gen}_m_total":= n(),
+              "{gen}_m_residual":= (sum(rating-average_rating)/(n() + genre_k_m))
+    )
+}
+genre_unprocessed <- lapply(1:total_genres, get_genre_residual_movie)
+genre_movie_regularized <- reduce(genre_unprocessed,left_join,by="movieId") %>% 
+  replace(is.na(.),0)
+# Res
+res <- edx__test %>% 
+  left_join(movie_genre_residual,by = "movieId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>%
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            timestamp = first(timestamp),    # Also constant within the group
+            .groups = "drop") %>% 
+  replace(is.na(.),0) %>% 
+  mutate(predicted_rating = genre_residual + average_rating)
+# RMSE
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+
+#
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "Movie-Genre Bias Model w/ Regularization", 
+                                   rmse = res_rmse))
+```
+
+
+Using *k* of `r genre_k_m`, the resulting RMSE has `r res_rmse`.\
+\
+
+\newpage
+
+Plotting the results:\
+
+```{r movieGenreBiasModel-plot}
+#| fig.cap = "Predicted vs. Actual Rating of the Movie-Genre Bias Model"
+plot_res_tile(res)
+```
+
+The results plot looked like the model barely predicted the actual ratings. 
+This is also shown by the High *RMSE*.
+However, it may still be used in conjuction with other biases.
+\
+Showing the Current Model Table:\
+
+```{r tableMovieGenreBiasModel}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+## Combine User Bias, Movie Bias, and Genre Bias
+
+Currently, there are 4 different bias obtained:\
+*User Bias*, *Movie Bias*, *Movie-Genre Bias*, *User-Genre Bias*\
+Notice that the 4 biases can be split into \
+User Biases     : *User Bias*, *User-Genre Bias*\
+Movie Biases    : *Movie Bias*, *Movie-Genre Bias*\
+\
+
+### Combined User Biases
+
+Testing the combination of User Biases using the formula:\
+$Y = \mu + b_{u} + b_{ug}$\
+Where* $b_{u}$ is the user bias\
+And   $b_{ug}$ is the user-genre bias\
+\
+
+```{r combinedUserBiasModel}
+# Get The dataframe with both biases' data
+combined_user_df <- edx__test %>% 
+  left_join(genre_residual,by = "userId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            .groups = "drop") %>% 
+  left_join(user_residuals_regularized %>% select(userId,user_residual), by="userId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual), mean_user, user_residual)) %>%
+  replace(is.na(.),0)
+# Formulate the Prediction:
+res <- combined_user_df %>% 
+  mutate(whole_user_bias = user_residual + genre_residual) %>% 
+  mutate(predicted_rating = whole_user_bias + average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+
+# Get RMSE:
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "Combined User Biases Model",
+                                   rmse = res_rmse))
+```
+
+Plotting the results for the combined User-Bias Model:\
+
+```{r combinedUserBiasModelResults}
+#| fig.cap = "Predicted vs. Actual Ratings of Combined User Bias Model"
+plot_res_tile(res)
+```
+
+The combined User Bias Model has an *RMSE* of `r res_rmse`.\
+\
+
+\newpage
+
+### Combined Movie Biases
+
+Testing the combination of User Biases using the formula:\
+$Y = \mu + b_{m} + b_{mg}$\
+Where $b_{m}$ is the movie bias\
+And   $b_{mg}$ is the movie-genre bias\
+
+```{r combinedMovieBiasModel}
+# Get dataframe with the movie biases data
+combined_movie_df <- edx__test %>% 
+  left_join(genre_movie_regularized,by = "movieId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>%
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "movie_residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(movie_genre_residual = movie_residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(movie_genre_residual = sum(movie_genre_residual)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            .groups = "drop") %>% 
+  left_join(movie_residuals_regularized %>% select(movieId, movie_residual), by = "movieId") %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual), mean_movie, movie_residual)) %>% 
+  replace(is.na(.),0) 
+# Predict the ratings using movie biases
+res <- combined_movie_df %>% 
+  mutate(whole_movie_bias = movie_residual + movie_genre_residual) %>% 
+  mutate(predicted_rating = whole_movie_bias + average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+
+# Get Results:
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "Combined Movie Bias Model",
+                                   rmse = res_rmse))
+```
+
+Plotting the results for the *Combined Movie Bias* Model:\
+
+```{r combinedMovieBiasModelResults}
+#| fig.cap = "Predicted vs. Actual Ratings of Combined Movie Bias Model."
+plot_res_tile(res)
+```
+
+The combined Movie Bias Model has an *RMSE* of `r res_rmse`.\
+
+\newpage
+
+The current Model Table:\
+
+```{r tableOfCombinedModels}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+### Combined Biases:
+
+The two models can be combined using the formula:\
+$Y = \mu + [b_{u} + b_{ug}] + [b_{m} + b_{mg}]$\
+Where,\
+$b_{u}$ and $b_{ug}$ are the user bias and user-genre bias of user $u$.\
+$b_{m}$ and $b_{mg}$ are the movie bias and movie-genre bias of user $m$.\
+
+```{r combinedCombinedModels}
+# Get Movie Genre details
+movie_genre_df <- edx__test %>%  
+  left_join(genre_movie_regularized,by = "movieId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>%
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "movie_residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  select(userId, movieId, residual_type, movie_residual_value)
+# Get User Genre Details
+user_genre_df <- edx__test %>% 
+  left_join(genre_residual_regularized, by = "userId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  select(userId,movieId,rating,timestamp,title,genres,residual_type,residual_value)
+# Combined the two genre_df:
+combined_df <- left_join(movie_genre_df,user_genre_df, by = c("userId","movieId","residual_type"))
+# Get the total genre effect on each movie
+genre_effect <- combined_df %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  mutate(movie_residual_value = movie_residual_value * residual_multiplier) %>% 
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            movie_genre_residual = sum(movie_residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            timestamp = first(timestamp),    # Also constant within the group
+            title = first(title),            # preserve title
+            .groups = "drop")
+# Join User bias and Movie Bias:
+combined_effects <- genre_effect %>% 
+  left_join(user_residuals_regularized %>% select(userId,user_residual), by="userId") %>% 
+  left_join(movie_residuals_regularized %>% select(movieId, movie_residual), by = "movieId") %>% 
+  mutate(user_residual = ifelse(is.na(user_residual), mean_user, user_residual)) %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual), mean_movie, movie_residual)) %>% 
+  replace(is.na(.),0)
+```
+
+```{r combineCombinedModels-rm,include = FALSE}
+rm(movie_genre_df,user_genre_df)
+rm(combined_df,genre_effect)
+```
+
+```{r combineCombinedModels-result}
+res <- combined_effects %>% 
+  mutate(user_spec_residual = (user_residual) + (genre_residual)) %>% 
+  mutate(movie_spec_residual = (movie_residual) + (movie_genre_residual)) %>% 
+  mutate(predicted_rating = (movie_spec_residual) + (user_spec_residual) + average_rating)
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+# Results Table
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "User + Movie with Genre Model",
+                                   rmse = res_rmse))
+```
+
+Plotting the results for the combined Model:\
+
+```{r combinedCombinedModels-plotresults}
+#| fig.cap = "Predicted vs. Actual Ratings of User+Movie with Genre Model"
+plot_res_tile(res)
+```
+
+The model resulted to an *RMSE* of `r res_rmse`.\
+
+\newpage
+
+Showing the models table:\
+
+```{r combineCombinedModelsTable}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+## Adjustments
+
+Adjust the last model to minimize RMSE more.\
+
+### Shift ratings within the range
+
+Looking at this part of the data:\
+
+```{r moreThanMax}
+res %>% 
+  arrange(desc(predicted_rating)) %>% 
+  top_n(10,predicted_rating) %>% 
+  select(userId,movieId,predicted_rating,rating) %>% 
+  knitr::kable()
+```
+
+The maximum predicted rating goes beyond the maximum rating (`r max_rating`) of the training set.\
+Also:\
+
+```{r lessThanMin}
+res %>% 
+  arrange(predicted_rating) %>% 
+  top_n(-10,predicted_rating) %>% 
+  select(userId,movieId,predicted_rating,rating) %>% 
+  knitr::kable()
+```
+
+The minimum predicted rating goes lower than the minimum rating (`r min_rating`) of the training set.\
+Adjusting the result:\
+
+```{r adjustedResult}
+# use combined_effects
+res <- combined_effects %>% 
+  mutate(user_spec_residual = (user_residual) + (genre_residual)) %>% 
+  mutate(movie_spec_residual = (movie_residual) + (movie_genre_residual)) %>% 
+  mutate(predicted_rating = (movie_spec_residual) + (user_spec_residual) + average_rating) %>% 
+    mutate(predicted_rating = ifelse(predicted_rating > max_rating,
+                                     max_rating, predicted_rating)) %>% 
+    mutate(predicted_rating = ifelse(predicted_rating < min_rating,
+                                     min_rating, predicted_rating))
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "Adjusted User + Movie w/ Genre Effect Model",
+                                   rmse = res_rmse))
+```
+
+\newpage
+
+Plotting the results of the adjusted model:\
+
+```{r adjustedModelPlot}
+#| fig.cap = "Predicted vs. Actual Ratings of Adjusted Model"
+plot_res_tile(res)
+```
+
+After adjustment the RMSE is `r res_rmse`.\
+\
+Showing the table of models:\
+
+```{r adjustedResultTable}
+Model_List %>% knitr::kable()
+```
+
+\newpage
+
+### Multipliers
+
+Notice from the previous models, the User Bias and the User-Genre Bias
+both describes the users' preference and 
+the Movie Bias and the Movie-Genre Bias both describes the movies' effect on ratings.
+This can be better seen by taking the correlations:\
+
+```{r getCorrelations}
+combined_effects %>% 
+  summarise(user_correlation = cor(user_residual,genre_residual),
+            movie_correlation = cor(movie_residual,movie_genre_residual)) %>% 
+  knitr::kable()
+```
+
+As the correlations show, the biases are correlated with each other. 
+It is possible that there is some overlap in their effects which resulted in the higher *RMSE*. 
+To try and compensate for this overlap, the model can be changed to:\
+
+$Y = \mu + [(x_{u})b_{u} + (x_{ug})b_{ug}] + [(x_m)b_{m} + (x_{mg})b_{mg}]$\
+Where $x_{u}$, $x_{ug}$, $x_{m}$ and $x_{mg}$ are the coefficients of the user and movie biases
+that can reduce the overlap with the genre bias.\
+Look for the coefficients by checking the *RMSE* of the model when 
+the coefficients are changed from 0 to 1 with 0.1 intervals.\
+
+```{r getCoefficients}
+# Declare Function for getting coefficients
+parameter_lookup <- function(par_vector){
+  # Get coefficients
+  x_ur <- UM_seq[par_vector,]$ur
+  x_ug <- UM_seq[par_vector,]$ug
+  x_mr <- UM_seq[par_vector,]$mr
+  x_mg <- UM_seq[par_vector,]$mg
+  # Get the results
+  res <- combined_effects %>% 
+    mutate(user_spec_residual = ((x_ur)*user_residual) + ((x_ug)*genre_residual)) %>% 
+    mutate(movie_spec_residual = ((x_mr)*movie_residual) + ((x_mg)*movie_genre_residual)) %>% 
+    mutate(predicted_rating = (user_spec_residual) + (movie_spec_residual) + average_rating) %>% 
+    mutate(predicted_rating = ifelse(predicted_rating > max_rating,
+                                     max_rating, predicted_rating)) %>% 
+    mutate(predicted_rating = ifelse(predicted_rating < min_rating,
+                                     min_rating, predicted_rating))
+  RMSE(res$predicted_rating,res$rating)
+}
+# each sequence
+UR_seq <- seq(0,1,0.1)
+UG_seq <- seq(0,1,0.1)
+MR_seq <- seq(0,1,0.1)
+MG_seq <- seq(0,1,0.1)
+# Merge all into one
+U_seq <- merge(UR_seq,UG_seq)
+names(U_seq) <- c("ur","ug")
+M_seq <- merge(MR_seq,MG_seq)
+names(M_seq) <- c("mr","mg")
+UM_seq <- merge(U_seq,M_seq) %>% rowid_to_column("row_id")
+#UM_seq %>% head() %>% knitr::kable()
+# Lapply 
+UM_rmse <- lapply(1:nrow(UM_seq),parameter_lookup)
+UM_rmse <- unlist(UM_rmse)
+```
+
+Plot:\
+
+```{r getCoefficients-plot}
+#| echo = FALSE
+plot_param_rmse(UM_seq$row_id,UM_rmse,0)
+```
+
+Showing best results:\
+
+```{r getCoefficients-results}
+min_rmse <- min(UM_rmse) 
+min_x <- UM_seq[which.min(UM_rmse),] 
+cbind(min_x,min_rmse) %>% knitr::kable()
+#min_x %>% knitr::kable()
+# Put them into variables
+x_ur <- min_x$ur
+x_ug <- min_x$ug
+x_mr <- min_x$mr
+x_mg <- min_x$mg
+```
+
+The results show for the user biases, only the user-genre bias is needed.
+While for the movie biases, the movie-genre bias is not needed.\
+\
+The current best Model to use is thus:\
+$Y = \mu + [(`r x_ur`)b_{u} + (`r x_ug`)b_{ug}] + [(`r x_mr`)b_{m} + (`r x_mg`)b_{mg}]$ \
+or,\
+$Y = \mu + (`r x_ug`) b_{ug} + (`r x_mr`) b_{m}$
+
+
+```{r fullModelWithX}
+res <- combined_effects %>% 
+  mutate(user_spec_residual = ((x_ur)*user_residual) + ((x_ug)*genre_residual)) %>% 
+  mutate(movie_spec_residual = ((x_mr)*movie_residual) + ((x_mg)*movie_genre_residual)) %>% 
+  mutate(predicted_rating = (movie_spec_residual) + (user_spec_residual) + average_rating) %>% 
+    mutate(predicted_rating = ifelse(predicted_rating > max_rating,
+                                     max_rating, predicted_rating)) %>% 
+    mutate(predicted_rating = ifelse(predicted_rating < min_rating,
+                                     min_rating, predicted_rating))
+res_rmse <- RMSE(res$predicted_rating,res$rating)
+
+#
+Model_List <- bind_rows(Model_List, 
+                        data.frame(Model = "Adjusted User + Movie w/ Genre Effect & coefficients Model",
+                                   rmse = res_rmse))
+```
+
+Plotting the results:\
+
+```{r fullModelWithXPlot}
+#| fig.cap = "Predicted vs. Actual Ratings of Adjusted Model with Coefficients."
+plot_res_tile(res)
+```
+
+The current model resulted to an *RMSE* of `r res_rmse`.
+The *RMSE* `r res_rmse` has reached the goal of $RMSE < 0.86490$.\
+
+\newpage
+
+The Full list of models:\
+```{r fullListModels}
+Model_List <- Model_List %>% 
+  mutate( within_target = rmse < 0.86490 )
+Model_List %>% knitr::kable(col.names = c("Model", "rmse", " < 0.86490 "))
+```
+
+
+
+For the final evaluation using the *Validation Set*, the entire *Input Set* `edx`
+can be used to train the model or obtain biases. 
+This will result to a better model or a better fit, 
+since the *Input Set* will have more data for training.\
+
+\newpage
+
+## Final Model
+
+Previously, the coefficients obtained resulted to a coefficient of
+`0` for *User Bias* and *Movie-Genre Bias*.
+This means that for the final model, the two Biases can be ignored.\
+\
+Using the User-Genre $x_{ug}$:\
+$x_{ug} = \sum_{i=1}^{n}( g_{m,i} b_{g,u,i})$\
+Where,\
+$g_{m,i}$ is **1** if movie $m$ is in the genre $i$, **0** otherwise.\
+$b_{g,u,i}$ is the genre preference/residual of user $u$ for genre $i$.\
+\
+The final model formula is:\
+$Y = \mu + (0.9)x_{ug} + (0.8)x_{m}$\
+Where,\
+$\mu$ is the overall average rating,\
+$x_{ug}$ is the User-Genre Bias.\
+$x_{m}$ is the Movie Bias.\
+\
+For the final model, the entire *Input Set* `edx` was used to train the model.
+```{r startTime}
+# Get start time
+start_time <- now()
+```
+
+```{r getSummaryFinal}
+overall_average <- edx %>% 
+  summarise(ave_rat = mean(rating),
+            min_rat = min(rating),
+            max_rat = max(rating) )
+max_rating <- overall_average$max_rat
+min_rating <- overall_average$min_rat
+average_rating <- overall_average$ave_rat
+```
+
+```{r getSummaryFinal-rm}
+rm(overall_average)
+```
+
+```{r getGenreDetails, echo = FALSE}
+# Re-obtain genre details, just in case there is a new genre previously unseen.
+genreList <- edx %>% 
+  mutate(genreList = str_extract_all(genres,"[a-zA-Z\\-\\s]+")) %>% 
+  .$genreList
+#
+genreList <- unlist(genreList)
+#
+genres_in_data <- unique(genreList)
+total_genres <- length(genres_in_data)
+#
+rm(genreList)
+#
+genres_with_pattern <- genres_in_data %>% 
+  as.data.frame() %>% 
+  mutate(genres = .[]) %>% 
+  select(genres) %>%
+  rowwise(genres) %>% 
+  mutate(genre_pattern = get_pattern(genres)) %>% 
+  ungroup()
+# Function changed source to edx.
+extract_genre_details <- function(i){
+  genre_pattern <-  genres_with_pattern$genre_pattern[i]
+  Genres <- genres_with_pattern$genres[i]
+  edx %>% 
+    filter(str_detect(genres,genre_pattern)) %>% 
+    summarise(average = mean(rating),n=n()) %>% 
+    mutate(genres = Genres)
+}
+genre_summary <- genres_with_pattern %>% 
+  left_join((sapply(1:total_genres, extract_genre_details)) %>% 
+              t() %>% 
+              as.data.frame() %>% 
+              mutate(genres = unlist(genres)),by = "genres") %>% 
+  mutate(average = unlist(average)) %>% 
+  mutate(total = unlist(n)) %>% 
+  mutate(proportion = total / sum(total)) %>% 
+  select(genres,average,total,genre_pattern,proportion)
+
+```
+
+
+```{r getMovieBiasFinal}
+# previously optimized parameter k is still used.
+movie_residuals_regularized <- edx %>% 
+  group_by(movieId) %>% 
+  summarise(total = n(),
+            divisor = total + movie_k,
+            movie_residual = sum(rating - average_rating)/divisor) 
+# New mean_movie
+mean_movie <- movie_residuals_regularized %>% 
+  summarise(ave = mean(movie_residual)) %>% .$ave
+```
+
+
+```{r getUserGenreFinal}
+get_genre_residual_regularized <- function(i){
+  gen <- genres_with_pattern$genres[i]
+  pat <- genres_with_pattern$genre_pattern[i]
+  edx %>% 
+    filter(str_detect(genres,pat)) %>% 
+    group_by(userId) %>% 
+    summarise("{gen}_total":= n(),
+              "{gen}_residual":= (sum(rating-average_rating)/(n() + genre_k))
+    )
+}
+genre_unprocessed <- lapply(1:total_genres, get_genre_residual_regularized)
+genre_residual_regularized <- reduce(genre_unprocessed,left_join,by="userId") %>% 
+  replace(is.na(.),0)
+```
+
+\newpage
+
+# Results
+
+Using the Final Movie and User-Genre Biases,
+we can evaluate the model on the `final_holdout_test`.\
+
+```{r combinedFinalModel}
+# Join the Biases to the validation set
+new_res <- final_holdout_test %>% 
+  left_join(genre_residual_regularized, by = "userId") %>% 
+  mutate(across(everything(),~replace_na(.x,0))) %>% 
+  pivot_longer(cols = ends_with("residual"),
+               names_to = "residual_type",
+               values_to = "residual_value",
+               names_pattern = "^([a-zA-Z-\\s]*)[a-zA-Z_]*_residual") %>% 
+  select(userId,movieId,rating,title,genres,residual_type,residual_value) %>% 
+  mutate(residual_multiplier = ifelse(str_detect(residual_type,genres),1,0)) %>% 
+  mutate(residual_value = residual_value * residual_multiplier) %>%
+  group_by(userId,movieId) %>% 
+  summarise(genre_residual = sum(residual_value)/(sum(residual_multiplier)),
+            rating = first(rating),          # Rating is constant if same userId & movieId
+            title = first(title),            # preserve title
+            .groups = "drop") %>% 
+  left_join(movie_residuals_regularized %>% select(movieId, movie_residual), by = "movieId") %>% 
+  mutate(movie_residual = ifelse(is.na(movie_residual), mean_movie, movie_residual)) %>% 
+  replace(is.na(.),0) %>% 
+  mutate(predicted_rating = (0.9 * genre_residual) + (0.8 * movie_residual) + average_rating) %>% 
+  mutate(predicted_rating = ifelse(predicted_rating > max_rating,
+                                   max_rating, predicted_rating)) %>% 
+  mutate(predicted_rating = ifelse(predicted_rating < min_rating,
+                                   min_rating, predicted_rating))
+# Get end time
+end_time <- now()
+time_elapsed <- difftime(end_time,start_time) %>% round(2)
+```
+
+From the start of the Final Model to the end of prediction, the time taken is:\
+```{r showtime}
+time_elapsed %>% knitr::kable(col.names = "Time elapsed")
+```
+Using the Final Model, the RMSE of the Final Evaluation on the *validation set* `final_holdout_test`:\
+
+```{r finalEvaluation}
+# Evaluation RMSE
+final_rmse <-  RMSE(new_res$predicted_rating,new_res$rating)
+# Show RMSE in table
+Model_Final <- data.frame(Model = "Final Evaluation of the Final Model", 
+                          rmse = final_rmse)
+Model_Final %>% knitr::kable()
+```
+
+The Final Result is within the target RMSE of `<0.86490`.\
+\
+Plotting the Results:\
+
+```{r finalEvaluation-Plot}
+#| fig.cap = "Predicted vs. Actual Ratings for the Final Model"
+plot_res_tile(new_res)
+```
+
+The model has a high accuracy for ratings between *3.5* to *4*, 
+or ratings close to the average `r average_rating`.
+However, the Model still has problems predicting the lower end of ratings (0.5-1.5). 
+
+\newpage
+
+# Conclusion
+
+The final model was obtained by first obtaining the User and Movie Bias of the
+training set. 
+Then, based on how the User and Movie Bias are obtained,
+derive a way to obtain the effect of movie genre on the user's and movie's ratings.
+This genre effect were the User-Genre Bias and the Movie-Genre Bias.
+Each of the 4 biases were optimized using regularization and 
+the optimization of the regularization parameter. 
+The model also took into account predicted ratings outside 
+the range of the input ratings.
+Finally, find the coefficients or multiplier of each of the 4 Bias. 
+The obtained coefficients showed that the User Bias and the Movie-Genre Bias can
+be removed. 
+By using the *Input Set* `edx`,
+the final model, evaluated on the *validation set* `final_holdout_test`,
+resulted to an RMSE less than 0.86490 at `r final_rmse`.\
+\
+Since, the final model mainly uses past ratings to predict future ratings,
+it will likely fail to predict users or movies with no prior ratings made.
+Also, the final model was trained from a data set with fixed number of rows/data,
+which is different from practical applications with new data coming in regularly.
+The model can be adapted to practical applications by updating the initially 
+obtained biases with the incoming data.
+
